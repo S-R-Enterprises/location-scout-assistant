@@ -1,7 +1,4 @@
-import os
-
 from fastapi import APIRouter, File, Form, UploadFile, HTTPException
-from fastapi.responses import JSONResponse
 
 from agent.agent import run_pipeline
 from backend.models.schemas import ProjectReport
@@ -16,13 +13,6 @@ async def analyze_screenplay(
     base_region: str = Form("Kathmandu Valley"),
     project_name: str = Form("Untitled Project"),
 ):
-    api_key = os.environ.get("GOOGLE_MAPS_API_KEY") or os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        raise HTTPException(
-            status_code=500,
-            detail="API key not configured. Set GOOGLE_MAPS_API_KEY or GEMINI_API_KEY.",
-        )
-
     pdf_bytes = None
     if file:
         content = await file.read()
@@ -43,7 +33,6 @@ async def analyze_screenplay(
             text_input=text,
             base_region=base_region,
             project_name=project_name,
-            api_key=api_key,
         )
         return report
     except ValueError as e:

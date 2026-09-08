@@ -1,23 +1,8 @@
-import json
 import re
+import io
 from typing import Optional
 
-from google import genai
-from google.genai import types
-
 from backend.models.schemas import Scene
-
-SYSTEM_PROMPT = """You are a screenplay parser. Extract all scenes from the provided screenplay text.
-For each scene, return a JSON array of objects with these fields:
-- scene_number: integer
-- int_ext: "INT" or "EXT"
-- location_description: string describing the location
-- time_of_day: "DAY", "NIGHT", "DAWN", "DUSK", or "CONTINUOUS"
-- terrain_tags: array of relevant terrain/setting tags (e.g. "urban", "industrial", "forest", "indoor", "residential")
-- characters_present: array of character names mentioned in the scene
-
-Return ONLY the JSON array, no other text. If you cannot parse a scene, skip it.
-Use regex fallback for INT./EXT. sluglines if needed."""
 
 SLUGLINE_PATTERN = re.compile(
     r"^(?:\d+\.?\s*)?(INT\.?|EXT\.?|INT\.?\s*/\s*EXT\.?|EXT\.?\s*/\s*INT\.?)\s*"
@@ -25,11 +10,32 @@ SLUGLINE_PATTERN = re.compile(
     re.MULTILINE | re.IGNORECASE,
 )
 
+LOCATION_KEYWORDS = {
+    "urban": ["street", "city", "downtown", "building", "office", "apartment", "house", "room", "cafe", "restaurant", "bar", "hotel", "mall", "shop", "store", "market"],
+    "industrial": ["factory", "warehouse", "plant", "mill", "dock", "port", "construction", "workshop", "garage"],
+    "nature": ["forest", "park", "garden", "field", "meadow", "hill", "mountain", "river", "lake", "beach", "coast", "desert", "canyon", "valley"],
+    "residential": ["home", "house", "apartment", "neighborhood", "suburb", "village", "town"],
+    "indoor": ["room", "hall", "office", "kitchen", "bedroom", "bathroom", "lobby", "theater", "cinema", "museum", "church", "temmos"],
+    "exterior": ["outside", "yard", "garden", "street", "road", "highway", "bridge", "rooftop", "balcony", "patio"],
+    "water": ["ocean", "sea", "river", "lake", "pool", "harbor", "dock", "pier", "beach", "waterfall"],
+    "night": ["nightclub", "bar", "alley", "dark", "shadow", "moonlight", "streetlight"],
+}
+
+
+def detect_terrain_tags(text: str) -> list[str]:
+    text_lower = text.lower()
+    tags = []
+    for tag, keywords in LOCATION_KEYWORDS.items():
+        if any(kw in text_lower for kw in keywords):
+            tags.append(tag)
+    return tags if tags else ["general"]
+
 
 def regex_fallback_parse(text: str) -> list[Scene]:
     scenes = []
     lines = text.split("\n")
     current_scene_num = 0
+
     for line in lines:
         line = line.strip()
         match = SLUGLINE_PATTERN.match(line)
@@ -38,8 +44,6 @@ def regex_fallback_parse(text: str) -> list[Scene]:
             int_ext_raw = match.group(1).upper().replace(".", "")
             if "/" in int_ext_raw:
                 int_ext_raw = "INT/EXT"
-            else:
-                int_ext_raw = int_ext_raw.replace("EXT", "EXT").replace("INT", "INT")
 
             time_of_day = "DAY"
             upper_line = line.upper()
@@ -65,45 +69,28 @@ def regex_fallback_parse(text: str) -> list[Scene]:
             if not location_part:
                 location_part = "Unknown location"
 
+            terrain_tags = detect_terrain_tags(location_part)
+
             scenes.append(
                 Scene(
                     scene_number=current_scene_num,
                     int_ext=int_ext_raw,
                     location_description=location_part,
                     time_of_day=time_of_day,
-                    terrain_tags=[],
+                    terrain_tags=terrain_tags,
                     characters_present=[],
                 )
             )
     return scenes
 
 
-async def extract_scenes_gemini(text: str, api_key: str) -> list[Scene]:
-    try:
-        client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=f"{SYSTEM_PROMPT}\n\nScreenplay:\n{text[:15000]}",
-            config=types.GenerateContentConfig(
-                temperature=0.1,
-                max_output_tokens=8192,
-            ),
-        )
-        raw = response.text.strip()
-        if raw.startswith("```"):
-            raw = re.sub(r"^```(?:json)?\s*", "", raw)
-            raw = re.sub(r"\s*```$", "", raw)
-        scenes_data = json.loads(raw)
-        return [Scene(**s) for s in scenes_data]
-    except Exception as e:
-        print(f"Gemini parsing failed, using regex fallback: {e}")
-        return regex_fallback_parse(text)
+async def extract_scenes(text: str) -> list[Scene]:
+    return regex_fallback_parse(text)
 
 
 def extract_text_from_pdf(pdf_bytes: bytes) -> str:
     try:
         import pdfplumber
-        import io
         text = ""
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             for page in pdf.pages:

@@ -1,4 +1,5 @@
 import httpx
+import math
 
 from backend.models.schemas import (
     CandidateLocation,
@@ -7,7 +8,7 @@ from backend.models.schemas import (
     TravelLeg,
 )
 
-DIRECTIONS_URL = "https://maps.googleapis.com/maps/api/directions/json"
+OSRM_ROUTE_URL = "https://router.project-osrm.org/route/v1/driving"
 
 
 async def get_travel_info(
@@ -15,31 +16,38 @@ async def get_travel_info(
     origin_lng: float,
     dest_lat: float,
     dest_lng: float,
-    api_key: str,
 ) -> tuple[float, float]:
     async with httpx.AsyncClient() as client:
-        resp = await client.get(
-            DIRECTIONS_URL,
-            params={
-                "origin": f"{origin_lat},{origin_lng}",
-                "destination": f"{dest_lat},{dest_lng}",
-                "key": api_key,
-                "mode": "driving",
-            },
-            timeout=10,
-        )
-        data = resp.json()
-        if data.get("routes"):
-            leg = data["routes"][0]["legs"][0]
-            distance_km = leg["distance"]["value"] / 1000.0
-            duration_min = leg["duration"]["value"] / 60.0
-            return distance_km, duration_min
-    return 0.0, 0.0
+        try:
+            resp = await client.get(
+                f"{OSRM_ROUTE_URL}/{origin_lng},{origin_lat};{dest_lng},{dest_lat}",
+                params={"overview": "false"},
+                timeout=10,
+            )
+            data = resp.json()
+            if data.get("routes"):
+                route = data["routes"][0]
+                distance_km = route["distance"] / 1000.0
+                duration_min = route["duration"] / 60.0
+                return distance_km, duration_min
+        except Exception as e:
+            print(f"OSRM API error: {e}")
+
+    R = 6371
+    dlat = math.radians(dest_lat - origin_lat)
+    dlon = math.radians(dest_lng - origin_lng)
+    a = (math.sin(dlat / 2) ** 2 +
+         math.cos(math.radians(origin_lat)) * math.cos(math.radians(dest_lat)) *
+         math.sin(dlon / 2) ** 2)
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    distance_km = R * c
+    duration_min = (distance_km / 60.0) * 60
+
+    return round(distance_km, 2), round(duration_min, 1)
 
 
 async def calculate_pairwise_travel(
     shoot_order: list[ShootOrderItem],
-    api_key: str,
 ) -> list[ShootOrderItem]:
     for i in range(len(shoot_order) - 1):
         curr = shoot_order[i]
@@ -49,7 +57,6 @@ async def calculate_pairwise_travel(
             curr.location.lng,
             next_item.location.lat,
             next_item.location.lng,
-            api_key,
         )
         curr.travel_to_next = TravelLeg(
             from_location=curr.location.name,
